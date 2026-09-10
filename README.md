@@ -66,7 +66,7 @@ the specific conversation you want to clean.
 
 ```bash
 pip install selenium
-python snap_cleaner.py
+python snap_automation.py
 ```
 
 The script locks onto the currently open conversation URL. If you
