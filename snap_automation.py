@@ -1,14 +1,3 @@
-"""
-Snapchat Web Bulk Snap Cleaner
-===============================
-Scans an open Snapchat Web conversation from bottom to top and,
-for each Snap it finds, automatically clicks "Delete" if available,
-otherwise "Unsave". Regular text messages are left untouched.
-
-Requires Chrome running with remote debugging enabled and
-Snapchat Web already open in a conversation. See README.md.
-"""
-
 import time
 from urllib.parse import urlparse
 
@@ -16,7 +5,10 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import StaleElementReferenceException, WebDriverException
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    WebDriverException,
+)
 
 
 # ============================================================
@@ -25,16 +17,32 @@ from selenium.common.exceptions import StaleElementReferenceException, WebDriver
 
 DEBUGGER_ADDRESS = "127.0.0.1:9222"
 
-ACTION_POLL_INTERVAL = 0.02   # how often to re-check for a hover action
-ACTION_TIMEOUT = 0.16         # max time to wait for hover action to appear
-POST_ACTION_WAIT = 0.05       # pause after clicking an action
-POST_SCROLL_WAIT = 0.06       # pause after scrolling
-SCROLL_RATIO = 0.88           # overlap ratio so no Snap is skipped at edges
+# Fast hover/action detection.
+ACTION_POLL_INTERVAL = 0.02
+ACTION_TIMEOUT = 0.16
 
-TRASH_PATH_MARKER = "M9.75 4.624"       # SVG path fingerprint for "Delete"
-UNSAVE_PATH_MARKERS = ("M18.742 4.576",)  # SVG path fingerprint(s) for "Unsave"
+# Small wait after clicking an action.
+POST_ACTION_WAIT = 0.05
 
-MAX_NO_ACTION_ATTEMPTS = 2    # times to retry a Snap with no action before skipping
+# Small wait after scrolling.
+POST_SCROLL_WAIT = 0.06
+
+# Scroll overlap prevents missing Snaps at viewport boundaries.
+SCROLL_RATIO = 0.88
+
+# Existing working Trash SVG marker.
+TRASH_PATH_MARKER = "M9.75 4.624"
+
+# Existing Unsave SVG marker.
+UNSAVE_PATH_MARKERS = (
+    "M18.742 4.576",
+)
+
+MEDIA_SELECTOR = "img, video"
+
+# Number of times a Snap can be inspected without an action
+# before it is considered checked.
+MAX_NO_ACTION_ATTEMPTS = 2
 
 
 # ============================================================
@@ -43,10 +51,17 @@ MAX_NO_ACTION_ATTEMPTS = 2    # times to retry a Snap with no action before skip
 
 def connect_to_chrome():
     options = Options()
-    options.add_experimental_option("debuggerAddress", DEBUGGER_ADDRESS)
+    options.add_experimental_option(
+        "debuggerAddress",
+        DEBUGGER_ADDRESS
+    )
 
     print("Connecting to Chrome...")
-    driver = webdriver.Chrome(options=options)
+
+    driver = webdriver.Chrome(
+        options=options
+    )
+
     print("Connected successfully!")
     print("Current URL:", driver.current_url)
 
@@ -62,10 +77,14 @@ def get_locked_url(driver):
     parsed = urlparse(url)
 
     if parsed.netloc != "www.snapchat.com":
-        raise RuntimeError("Snapchat Web is not open.")
+        raise RuntimeError(
+            "Snapchat Web is not open."
+        )
 
     if not parsed.path.startswith("/web/"):
-        raise RuntimeError("Open the Snapchat conversation first.")
+        raise RuntimeError(
+            "Open the Snapchat conversation first."
+        )
 
     return url
 
@@ -75,7 +94,13 @@ def conversation_is_locked(driver, locked_url):
 
 
 def get_conversation_pane(driver, locked_url):
-    parts = [p for p in urlparse(locked_url).path.split("/") if p]
+    parsed = urlparse(locked_url)
+
+    parts = [
+        part
+        for part in parsed.path.split("/")
+        if part
+    ]
 
     if len(parts) < 2:
         return None
@@ -83,9 +108,40 @@ def get_conversation_pane(driver, locked_url):
     conversation_id = parts[1]
 
     try:
-        return driver.find_element(By.ID, f"cv-{conversation_id}")
+        return driver.find_element(
+            By.ID,
+            f"cv-{conversation_id}"
+        )
+
     except Exception:
         return None
+
+
+# ============================================================
+# TEXT HELPERS
+# ============================================================
+
+def should_ignore(text):
+    if not text:
+        return False
+
+    normalized = text.lower().strip()
+
+    ignored_phrases = (
+        "you deleted a snap",
+        "you deleted a chat",
+        "this message was deleted",
+        "your snapstreak ended",
+        "started a snapstreak",
+        "not supported on web",
+        "check from your phone",
+    )
+
+    for phrase in ignored_phrases:
+        if phrase in normalized:
+            return True
+
+    return False
 
 
 # ============================================================
@@ -94,7 +150,11 @@ def get_conversation_pane(driver, locked_url):
 
 def get_message_content(message):
     try:
-        return message.find_element(By.CSS_SELECTOR, ":scope > div.KB4Aq")
+        return message.find_element(
+            By.CSS_SELECTOR,
+            ":scope > div.KB4Aq"
+        )
+
     except Exception:
         return None
 
@@ -105,8 +165,10 @@ def get_message_content(message):
 
 def find_visible_snaps(driver, pane):
     """
-    Returns only visible media/Snap candidates, each tagged with a
-    stable temporary ID so the same Snap isn't reprocessed after
+    Returns only visible media/Snap candidates.
+
+    Each DOM item gets a temporary unique ID so the same
+    Snap is not unnecessarily processed again because of
     scroll overlap.
     """
 
@@ -115,51 +177,121 @@ def find_visible_snaps(driver, pane):
     const viewportHeight = window.innerHeight;
 
     const ignoredPhrases = [
-        "you deleted a snap", "you deleted a chat", "this message was deleted",
-        "your snapstreak ended", "started a snapstreak",
-        "not supported on web", "check from your phone"
+        "you deleted a snap",
+        "you deleted a chat",
+        "this message was deleted",
+        "your snapstreak ended",
+        "started a snapstreak",
+        "not supported on web",
+        "check from your phone"
     ];
 
-    if (!window.__snapCleanerCounter) window.__snapCleanerCounter = 1;
+    if (!window.__snapCleanerCounter) {
+        window.__snapCleanerCounter = 1;
+    }
 
     const results = [];
     const seen = new Set();
 
-    for (const item of pane.querySelectorAll("li")) {
+    const items = pane.querySelectorAll("li");
+
+    for (const item of items) {
+
         try {
-            const content = item.querySelector(":scope > div.KB4Aq");
-            if (!content) continue;
+            const content =
+                item.querySelector(":scope > div.KB4Aq");
 
-            const rect = content.getBoundingClientRect();
-            if (rect.width <= 0 || rect.height <= 0) continue;
-            if (rect.bottom < 0 || rect.top > viewportHeight) continue;
-
-            const text = (item.innerText || "").trim().replace(/\\s+/g, " ").toLowerCase();
-            if (ignoredPhrases.some(phrase => text.includes(phrase))) continue;
-
-            const media = content.querySelector("img, video");
-            if (!media) continue;
-
-            if (!item.dataset.snapCleanerId) {
-                item.dataset.snapCleanerId = "snap-cleaner-" + window.__snapCleanerCounter++;
+            if (!content) {
+                continue;
             }
 
-            const id = item.dataset.snapCleanerId;
-            if (seen.has(id)) continue;
+            const rect =
+                content.getBoundingClientRect();
+
+            if (
+                rect.width <= 0 ||
+                rect.height <= 0
+            ) {
+                continue;
+            }
+
+            if (
+                rect.bottom < 0 ||
+                rect.top > viewportHeight
+            ) {
+                continue;
+            }
+
+            const text =
+                (item.innerText || "")
+                .trim()
+                .replace(/\\s+/g, " ")
+                .toLowerCase();
+
+            let ignored = false;
+
+            for (const phrase of ignoredPhrases) {
+                if (text.includes(phrase)) {
+                    ignored = true;
+                    break;
+                }
+            }
+
+            if (ignored) {
+                continue;
+            }
+
+            const media =
+                content.querySelector(
+                    "img, video"
+                );
+
+            if (!media) {
+                continue;
+            }
+
+            if (
+                !item.dataset.snapCleanerId
+            ) {
+                item.dataset.snapCleanerId =
+                    "snap-cleaner-" +
+                    window.__snapCleanerCounter++;
+            }
+
+            const id =
+                item.dataset.snapCleanerId;
+
+            if (seen.has(id)) {
+                continue;
+            }
+
             seen.add(id);
 
-            results.push({ element: item, id: id, top: rect.top, text: text });
+            results.push({
+                element: item,
+                id: id,
+                top: rect.top,
+                text: text
+            });
+
         } catch (error) {
             continue;
         }
     }
 
-    results.sort((a, b) => a.top - b.top);
+    results.sort(
+        (a, b) => a.top - b.top
+    );
+
     return results;
     """
 
     try:
-        return driver.execute_script(script, pane)
+        return driver.execute_script(
+            script,
+            pane
+        )
+
     except Exception:
         return []
 
@@ -169,15 +301,30 @@ def find_visible_snaps(driver, pane):
 # ============================================================
 
 def hover_message(driver, message):
-    """Hover only. Never click the Snap/media itself."""
+    """
+    Hover only.
+
+    Never click the Snap/media itself.
+    """
+
     try:
-        content = get_message_content(message)
+        content = get_message_content(
+            message
+        )
+
         if content is None:
             return False
 
-        ActionChains(driver).move_to_element(content).perform()
+        ActionChains(driver).move_to_element(
+            content
+        ).perform()
+
         return True
-    except (StaleElementReferenceException, WebDriverException):
+
+    except (
+        StaleElementReferenceException,
+        WebDriverException,
+    ):
         return False
 
 
@@ -187,9 +334,16 @@ def hover_message(driver, message):
 
 def find_available_action(driver, message):
     """
-    Checks for Delete and Unsave in one pass. Delete takes priority.
-    SVG path fingerprints are checked first; aria-label/title/
-    data-testid/text are a fallback for future UI changes.
+    Checks Delete and Unsave in one operation.
+
+    Priority:
+    1. Delete
+    2. Unsave
+
+    SVG markers are used first.
+
+    aria-label/title/data-testid/text are used as
+    fallback detection for future Snapchat UI changes.
     """
 
     script = """
@@ -197,79 +351,225 @@ def find_available_action(driver, message):
     const trashMarker = arguments[1];
     const unsaveMarkers = arguments[2];
 
-    const toolbar = message.querySelector(".Bhzh6");
-    if (!toolbar) return { found: false, reason: "no_toolbar" };
+    const toolbar =
+        message.querySelector(".Bhzh6");
 
-    let buttons = Array.from(toolbar.querySelectorAll("button.NcaQH"));
-    if (buttons.length === 0) buttons = Array.from(toolbar.querySelectorAll("button"));
+    if (!toolbar) {
+        return {
+            found: false,
+            reason: "no_toolbar"
+        };
+    }
+
+    let buttons =
+        Array.from(
+            toolbar.querySelectorAll(
+                "button.NcaQH"
+            )
+        );
+
+    if (buttons.length === 0) {
+        buttons =
+            Array.from(
+                toolbar.querySelectorAll(
+                    "button"
+                )
+            );
+    }
 
     function getButtonInfo(button) {
+
         const attributes = [
             button.getAttribute("aria-label") || "",
             button.getAttribute("title") || "",
             button.getAttribute("data-testid") || "",
             button.getAttribute("data-action") || "",
             button.innerText || ""
-        ].join(" ").toLowerCase();
+        ]
+        .join(" ")
+        .toLowerCase();
 
-        let isTrash = false, isUnsave = false;
+        const paths =
+            button.querySelectorAll(
+                "svg path"
+            );
 
-        for (const path of button.querySelectorAll("svg path")) {
-            const d = path.getAttribute("d") || "";
-            if (d.startsWith(trashMarker) || d.includes(trashMarker)) isTrash = true;
-            for (const marker of unsaveMarkers) {
-                if (d.startsWith(marker) || d.includes(marker)) isUnsave = true;
+        let isTrash = false;
+        let isUnsave = false;
+
+        for (const path of paths) {
+
+            const d =
+                path.getAttribute("d") || "";
+
+            if (
+                d.startsWith(trashMarker) ||
+                d.includes(trashMarker)
+            ) {
+                isTrash = true;
+            }
+
+            for (
+                const marker of unsaveMarkers
+            ) {
+                if (
+                    d.startsWith(marker) ||
+                    d.includes(marker)
+                ) {
+                    isUnsave = true;
+                }
             }
         }
 
-        if (attributes.includes("delete") || attributes.includes("trash")) isTrash = true;
-        if (attributes.includes("unsave")) isUnsave = true;
+        if (
+            attributes.includes("delete") ||
+            attributes.includes("trash")
+        ) {
+            isTrash = true;
+        }
 
-        return { trash: isTrash, unsave: isUnsave };
+        if (
+            attributes.includes("unsave")
+        ) {
+            isUnsave = true;
+        }
+
+        return {
+            trash: isTrash,
+            unsave: isUnsave
+        };
     }
 
-    for (let i = 0; i < buttons.length; i++) {
-        if (getButtonInfo(buttons[i]).trash) return { found: true, action: "delete", index: i };
+    // --------------------------------------------------------
+    // DELETE FIRST
+    // --------------------------------------------------------
+
+    for (
+        let i = 0;
+        i < buttons.length;
+        i++
+    ) {
+        const info =
+            getButtonInfo(buttons[i]);
+
+        if (info.trash) {
+            return {
+                found: true,
+                action: "delete",
+                index: i
+            };
+        }
     }
 
-    for (let i = 0; i < buttons.length; i++) {
-        if (getButtonInfo(buttons[i]).unsave) return { found: true, action: "unsave", index: i };
+    // --------------------------------------------------------
+    // THEN UNSAVE
+    // --------------------------------------------------------
+
+    for (
+        let i = 0;
+        i < buttons.length;
+        i++
+    ) {
+        const info =
+            getButtonInfo(buttons[i]);
+
+        if (info.unsave) {
+            return {
+                found: true,
+                action: "unsave",
+                index: i
+            };
+        }
     }
 
-    return { found: false, reason: "no_action" };
+    return {
+        found: false,
+        reason: "no_action"
+    };
     """
 
     try:
-        return driver.execute_script(script, message, TRASH_PATH_MARKER, list(UNSAVE_PATH_MARKERS))
+        return driver.execute_script(
+            script,
+            message,
+            TRASH_PATH_MARKER,
+            list(UNSAVE_PATH_MARKERS)
+        )
+
     except Exception:
-        return {"found": False}
+        return {
+            "found": False
+        }
 
 
 # ============================================================
 # CLICK ACTION
 # ============================================================
 
-def click_available_action(driver, message, action_index):
+def click_available_action(
+    driver,
+    message,
+    action_index
+):
     script = """
     const message = arguments[0];
     const index = arguments[1];
 
-    const toolbar = message.querySelector(".Bhzh6");
-    if (!toolbar) return { clicked: false };
+    const toolbar =
+        message.querySelector(".Bhzh6");
 
-    let buttons = Array.from(toolbar.querySelectorAll("button.NcaQH"));
-    if (buttons.length === 0) buttons = Array.from(toolbar.querySelectorAll("button"));
+    if (!toolbar) {
+        return {
+            clicked: false
+        };
+    }
 
-    if (index < 0 || index >= buttons.length) return { clicked: false };
+    let buttons =
+        Array.from(
+            toolbar.querySelectorAll(
+                "button.NcaQH"
+            )
+        );
 
-    buttons[index].click();
-    return { clicked: true };
+    if (buttons.length === 0) {
+        buttons =
+            Array.from(
+                toolbar.querySelectorAll(
+                    "button"
+                )
+            );
+    }
+
+    if (
+        index < 0 ||
+        index >= buttons.length
+    ) {
+        return {
+            clicked: false
+        };
+    }
+
+    const button =
+        buttons[index];
+
+    button.click();
+
+    return {
+        clicked: true
+    };
     """
 
     try:
-        return driver.execute_script(script, message, action_index)
+        return driver.execute_script(
+            script,
+            message,
+            action_index
+        )
+
     except Exception:
-        return {"clicked": False}
+        return {
+            "clicked": False
+        }
 
 
 # ============================================================
@@ -277,77 +577,180 @@ def click_available_action(driver, message, action_index):
 # ============================================================
 
 def process_snap(driver, message):
-    """Returns: mutated | no_action | stale"""
+    """
+    Returns:
+
+    mutated
+    no_action
+    stale
+    """
 
     try:
-        if not hover_message(driver, message):
+        if not hover_message(
+            driver,
+            message
+        ):
             return "stale"
 
-        deadline = time.perf_counter() + ACTION_TIMEOUT
-        action = {"found": False}
+        deadline = (
+            time.perf_counter() +
+            ACTION_TIMEOUT
+        )
 
-        while time.perf_counter() < deadline:
-            action = find_available_action(driver, message)
+        action = {
+            "found": False
+        }
+
+        while (
+            time.perf_counter() <
+            deadline
+        ):
+            action = find_available_action(
+                driver,
+                message
+            )
+
             if action.get("found"):
                 break
-            time.sleep(ACTION_POLL_INTERVAL)
+
+            time.sleep(
+                ACTION_POLL_INTERVAL
+            )
 
         if not action.get("found"):
             return "no_action"
 
-        result = click_available_action(driver, message, action["index"])
+        result = click_available_action(
+            driver,
+            message,
+            action["index"]
+        )
+
         if not result.get("clicked"):
             return "no_action"
 
-        print(f"{action['action'].upper()} ✓ button={action['index']}")
-        time.sleep(POST_ACTION_WAIT)
+        if action["action"] == "delete":
+            print(
+                "DELETE ✓ "
+                f"button={action['index']}"
+            )
+
+        elif action["action"] == "unsave":
+            print(
+                "UNSAVE ✓ "
+                f"button={action['index']}"
+            )
+
+        time.sleep(
+            POST_ACTION_WAIT
+        )
 
         return "mutated"
 
-    except (StaleElementReferenceException, WebDriverException):
+    except (
+        StaleElementReferenceException,
+        WebDriverException,
+    ):
         return "stale"
+
     except Exception as error:
-        print("Item error:", error)
+        print(
+            "Item error:",
+            error
+        )
+
         return "no_action"
 
 
 # ============================================================
-# SCROLLING
+# FIND SCROLL CONTAINER
 # ============================================================
 
-def find_scroll_container(driver, pane):
+def find_scroll_container(
+    driver,
+    pane
+):
     script = """
     let element = arguments[0];
+
     while (element) {
-        const style = window.getComputedStyle(element);
+
+        const style =
+            window.getComputedStyle(
+                element
+            );
+
+        const overflow =
+            style.overflowY;
+
         if (
-            (style.overflowY === "auto" || style.overflowY === "scroll") &&
-            element.scrollHeight > element.clientHeight + 10
+            (
+                overflow === "auto" ||
+                overflow === "scroll"
+            ) &&
+            element.scrollHeight >
+            element.clientHeight + 10
         ) {
             return element;
         }
-        element = element.parentElement;
+
+        element =
+            element.parentElement;
     }
+
     return null;
     """
 
     try:
-        return driver.execute_script(script, pane)
+        return driver.execute_script(
+            script,
+            pane
+        )
+
     except Exception:
         return None
 
 
-def scroll_up(driver, container):
+# ============================================================
+# SCROLL UP
+# ============================================================
+
+def scroll_up(
+    driver,
+    container
+):
     script = """
     const element = arguments[0];
     const ratio = arguments[1];
-    const before = element.scrollTop;
-    const distance = Math.max(350, element.clientHeight * ratio);
-    element.scrollTop = Math.max(0, before - distance);
-    return { before: before, after: element.scrollTop, clientHeight: element.clientHeight };
+
+    const before =
+        element.scrollTop;
+
+    const distance =
+        Math.max(
+            350,
+            element.clientHeight * ratio
+        );
+
+    element.scrollTop =
+        Math.max(
+            0,
+            before - distance
+        );
+
+    return {
+        before: before,
+        after: element.scrollTop,
+        clientHeight:
+            element.clientHeight
+    };
     """
 
-    return driver.execute_script(script, container, SCROLL_RATIO)
+    return driver.execute_script(
+        script,
+        container,
+        SCROLL_RATIO
+    )
 
 
 # ============================================================
@@ -356,11 +759,24 @@ def scroll_up(driver, container):
 
 def main():
     driver = connect_to_chrome()
-    locked_url = get_locked_url(driver)
 
-    stats = {"actions": 0, "scrolls": 0, "scans": 0, "no_action": 0, "already_checked": 0}
-    attempts = {}       # how many times a Snap was inspected without an action
-    completed = set()   # Snaps fully checked in previous overlapping viewports
+    locked_url = get_locked_url(
+        driver
+    )
+
+    stats = {
+        "actions": 0,
+        "scrolls": 0,
+        "scans": 0,
+        "no_action": 0,
+        "already_checked": 0,
+    }
+
+    # Tracks how many times a Snap was inspected.
+    attempts = {}
+
+    # Items fully checked in previous overlapping viewports.
+    completed = set()
 
     print()
     print("=" * 65)
@@ -377,86 +793,211 @@ def main():
 
     try:
         while True:
-            if not conversation_is_locked(driver, locked_url):
-                print("Conversation changed. Stopping.")
+
+            # ------------------------------------------------
+            # CONVERSATION SAFETY
+            # ------------------------------------------------
+
+            if not conversation_is_locked(
+                driver,
+                locked_url
+            ):
+                print(
+                    "Conversation changed. "
+                    "Stopping."
+                )
+
                 break
 
-            pane = get_conversation_pane(driver, locked_url)
+            pane = get_conversation_pane(
+                driver,
+                locked_url
+            )
+
             if pane is None:
                 time.sleep(0.05)
                 continue
 
             stats["scans"] += 1
-            snaps = find_visible_snaps(driver, pane)
+
+            snaps = find_visible_snaps(
+                driver,
+                pane
+            )
+
+            # ------------------------------------------------
+            # PROCESS BOTTOM → TOP
+            # ------------------------------------------------
+
             dom_changed = False
 
-            # Process bottom to top so deletions don't shift
-            # not-yet-processed elements out from under us.
             for candidate in reversed(snaps):
-                snap_id = candidate["id"]
+
+                snap_id =candidate["id"]
+
+                # ------------------------------------------------
+                # ALREADY COMPLETELY CHECKED
+                # ------------------------------------------------
 
                 if snap_id in completed:
-                    stats["already_checked"] += 1
+                    stats[
+                        "already_checked"
+                    ] += 1
+
                     continue
 
-                result = process_snap(driver, candidate["element"])
+                message =candidate["element"]
+
+                result = process_snap(
+                    driver,
+                    message
+                )
+
+                # ------------------------------------------------
+                # ACTION PERFORMED
+                # ------------------------------------------------
 
                 if result == "mutated":
                     stats["actions"] += 1
-                    completed.add(snap_id)
-                    dom_changed = True  # DOM may have changed, rescan
+
+                    completed.add(
+                        snap_id
+                    )
+
+                    # DOM may have changed.
+                    # Immediately rescan.
+                    dom_changed = True
+
                     break
+
+                # ------------------------------------------------
+                # STALE DOM
+                # ------------------------------------------------
 
                 if result == "stale":
                     dom_changed = True
                     break
 
-                # no_action
-                attempts[snap_id] = attempts.get(snap_id, 0) + 1
+                # ------------------------------------------------
+                # NO ACTION
+                # ------------------------------------------------
+
+                attempts[snap_id] = (
+                    attempts.get(
+                        snap_id,
+                        0
+                    ) + 1
+                )
+
                 stats["no_action"] += 1
 
-                if attempts[snap_id] >= MAX_NO_ACTION_ATTEMPTS:
-                    completed.add(snap_id)
+                if (
+                    attempts[snap_id] >=
+                    MAX_NO_ACTION_ATTEMPTS
+                ):
+                    completed.add(
+                        snap_id
+                    )
+
+            # ------------------------------------------------
+            # DOM CHANGED
+            # ------------------------------------------------
 
             if dom_changed:
                 continue
 
-            # Current view fully processed — try to scroll further up.
-            pane = get_conversation_pane(driver, locked_url)
+            # ------------------------------------------------
+            # CURRENT VIEW COMPLETE
+            # ------------------------------------------------
+
+            pane = get_conversation_pane(
+                driver,
+                locked_url
+            )
+
             if pane is None:
                 continue
 
-            container = find_scroll_container(driver, pane)
+            container = find_scroll_container(
+                driver,
+                pane
+            )
+
             if container is None:
-                print("Scroll container not found.")
+                print(
+                    "Scroll container not found."
+                )
+
                 break
 
-            scroll_top = driver.execute_script("return arguments[0].scrollTop;", container)
+            scroll_top = (
+                driver.execute_script(
+                    "return arguments[0].scrollTop;",
+                    container
+                )
+            )
+
+            # ------------------------------------------------
+            # TOP REACHED
+            # ------------------------------------------------
 
             if scroll_top <= 1:
                 print()
-                print("TOP OF CHAT REACHED.")
+                print(
+                    "TOP OF CHAT REACHED."
+                )
+
                 break
 
-            scroll_up(driver, container)
+            scroll_result = scroll_up(
+                driver,
+                container
+            )
+
             stats["scrolls"] += 1
-            print(f"↑ Scroll {stats['scrolls']} | Actions: {stats['actions']}")
-            time.sleep(POST_SCROLL_WAIT)
+
+            print(
+                f"↑ Scroll "
+                f"{stats['scrolls']} | "
+                f"Actions: "
+                f"{stats['actions']}"
+            )
+
+            time.sleep(
+                POST_SCROLL_WAIT
+            )
 
     except KeyboardInterrupt:
         print()
-        print("Stopped by user.")
+        print(
+            "Stopped by user."
+        )
 
     finally:
         print()
         print("=" * 65)
         print("FINAL RESULT")
         print("=" * 65)
-        print("Actions:", stats["actions"])
-        print("Scrolls:", stats["scrolls"])
-        print("Scans:", stats["scans"])
-        print("No action:", stats["no_action"])
-        print("Already checked:", stats["already_checked"])
+        print(
+            "Actions:",
+            stats["actions"]
+        )
+        print(
+            "Scrolls:",
+            stats["scrolls"]
+        )
+        print(
+            "Scans:",
+            stats["scans"]
+        )
+        print(
+            "No action:",
+            stats["no_action"]
+        )
+        print(
+            "Already checked:",
+            stats["already_checked"]
+        )
 
 
 if __name__ == "__main__":
